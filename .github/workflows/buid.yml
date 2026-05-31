@@ -44,8 +44,8 @@ jobs:
         with:
           fetch-depth: 0             # Full history for version code calculation
 
-      # ── Auto-create missing project files ───────────────────────────────────
-      - name: Auto-create missing files (local.properties & google-services.json)
+      # ── Auto-create missing project files & directories ───────────────────
+      - name: Auto-create missing files (local.properties, google-services, modules)
         run: |
           if [ ! -f "local.properties" ]; then
             echo "Creating missing local.properties..."
@@ -56,6 +56,12 @@ jobs:
             echo "Creating mock google-services.json to prevent build failure..."
             mkdir -p app
             echo '{"project_info":{"project_number":"1","project_id":"mock-project"},"client":[{"client_info":{"mobilesdk_app_id":"1:1:android:1","android_client_info":{"package_name":"com.konasl.nagad"}},"oauth_client":[],"api_key":[{"current_key":"mock"}],"services":{"appinvite_service":{"other_platform_oauth_client":[]}}}],"configuration_version":"1"}' > app/google-services.json
+          fi
+          
+          if [ ! -d "stub-host" ]; then
+            echo "Creating missing stub-host directory to prevent Gradle sync error..."
+            mkdir -p stub-host
+            echo "// Dummy build file" > stub-host/build.gradle
           fi
 
       # ── 2. JDK 17 ───────────────────────────────────────────────────────────
