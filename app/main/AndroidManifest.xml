@@ -1,0 +1,344 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    AndroidManifest.xml
+    Package: com.konasl.nagad
+    Virtual Environment / App Cloner
+    Programmatic UI only — no XML layouts, no themes, no drawables
+-->
+<manifest
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    package="com.konasl.nagad"
+    android:installLocation="internalOnly">
+
+    <!-- ═══════════════════════════════════════════════════════════════════════
+         PERMISSIONS — COMPLETE SET
+         ═══════════════════════════════════════════════════════════════════════ -->
+
+    <!-- Storage (legacy + scoped) -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29"
+        tools:ignore="ScopedStorage" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+    <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
+
+    <!-- Package querying / cloning core -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <uses-permission android:name="android.permission.DELETE_PACKAGES" />
+    <uses-permission android:name="android.permission.INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.CHANGE_COMPONENT_ENABLED_STATE" />
+
+    <!-- Process & multi-tasking -->
+    <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
+    <uses-permission android:name="android.permission.REORDER_TASKS" />
+    <uses-permission android:name="android.permission.GET_TASKS" tools:ignore="DeprecatedApi" />
+    <uses-permission android:name="android.permission.REAL_GET_TASKS" />
+    <uses-permission android:name="android.permission.MANAGE_ACTIVITY_STACKS" />
+    <uses-permission android:name="android.permission.START_ACTIVITIES_FROM_BACKGROUND" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+
+    <!-- Network -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.NFC" />
+    <uses-permission android:name="android.permission.NFC_TRANSACTION_EVENT" />
+    <uses-permission android:name="android.permission.TRANSMIT_IR" />
+
+    <!-- Location (required by cloned apps) -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+
+    <!-- Camera / Media -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CAPTURE_AUDIO_OUTPUT"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.CAPTURE_SECURE_VIDEO_OUTPUT"
+        tools:ignore="ProtectedPermissions" />
+
+    <!-- Contacts / Phone / SMS -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.WRITE_CONTACTS" />
+    <uses-permission android:name="android.permission.GET_ACCOUNTS" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.ADD_VOICEMAIL" />
+    <uses-permission android:name="android.permission.USE_SIP" />
+    <uses-permission android:name="android.permission.PROCESS_OUTGOING_CALLS"
+        tools:ignore="DeprecatedApi" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_WAP_PUSH" />
+    <uses-permission android:name="android.permission.RECEIVE_MMS" />
+
+    <!-- Calendar / Body sensors -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+    <uses-permission android:name="android.permission.BODY_SENSORS" />
+    <uses-permission android:name="android.permission.BODY_SENSORS_BACKGROUND" />
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+
+    <!-- Biometrics -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission android:name="android.permission.USE_FINGERPRINT"
+        tools:ignore="DeprecatedApi" />
+
+    <!-- System UI / window overlays -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.SYSTEM_OVERLAY_WINDOW" />
+
+    <!-- Accessibility -->
+    <uses-permission android:name="android.permission.BIND_ACCESSIBILITY_SERVICE" />
+
+    <!-- Wake lock / power -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REBOOT"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.BATTERY_STATS"
+        tools:ignore="ProtectedPermissions" />
+
+    <!-- Bluetooth -->
+    <uses-permission android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- Clipboard / input -->
+    <uses-permission android:name="android.permission.READ_CLIPBOARD" />
+
+    <!-- UWB -->
+    <uses-permission android:name="android.permission.UWB_RANGING" />
+
+    <!-- Nearby devices -->
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+
+    <!-- Virtual machine / process hooks (sharedUserId — root level) -->
+    <uses-permission android:name="android.permission.INTERACT_ACROSS_USERS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.INTERACT_ACROSS_USERS_FULL"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.MANAGE_USERS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.CREATE_USERS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.MANAGE_PROFILE_AND_DEVICE_OWNERS"
+        tools:ignore="ProtectedPermissions" />
+
+    <!-- Hidden APIs broad access marker -->
+    <uses-permission android:name="android.permission.READ_PRIVILEGED_PHONE_STATE"
+        tools:ignore="ProtectedPermissions" />
+
+    <!-- Media projection (screen mirroring inside virtual space) -->
+    <uses-permission android:name="android.permission.MEDIA_CONTENT_CONTROL"
+        tools:ignore="ProtectedPermissions" />
+
+    <!-- Telephony exact -->
+    <uses-permission android:name="android.permission.READ_PRECISE_PHONE_STATE" />
+
+    <!-- Hardware features (optional) -->
+    <uses-feature android:name="android.hardware.camera"          android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+    <uses-feature android:name="android.hardware.location.gps"    android:required="false" />
+    <uses-feature android:name="android.hardware.nfc"             android:required="false" />
+    <uses-feature android:name="android.hardware.bluetooth_le"    android:required="false" />
+    <uses-feature android:name="android.hardware.fingerprint"     android:required="false" />
+    <uses-feature android:name="android.hardware.sensor.accelerometer" android:required="false" />
+
+    <!-- ═══════════════════════════════════════════════════════════════════════
+         APPLICATION
+         ═══════════════════════════════════════════════════════════════════════ -->
+    <application
+        android:name=".CoreApplication"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
+        android:hardwareAccelerated="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:largeHeap="true"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:requestLegacyExternalStorage="true"
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
+        tools:targetApi="31"
+        tools:replace="android:allowBackup">
+
+        <!-- ── Virtual Engine Core Service (isolated process) ────────────── -->
+        <service
+            android:name=".engine.VirtualEngineService"
+            android:exported="false"
+            android:process=":engine"
+            android:isolatedProcess="false"
+            android:foregroundServiceType="dataSync|specialUse"
+            android:persistent="true" />
+
+        <!-- ── Virtual Binder Service ──────────────────────────────────────── -->
+        <service
+            android:name=".engine.VirtualBinderService"
+            android:exported="true"
+            android:process=":binder"
+            android:persistent="true">
+            <intent-filter>
+                <action android:name="com.konasl.nagad.VIRTUAL_BINDER" />
+            </intent-filter>
+        </service>
+
+        <!-- ── Stub stub processes p0–p9 (sandbox containers) ──────────────── -->
+        <service android:name=".stub.StubProcess0"  android:process=":p0"  android:exported="false" />
+        <service android:name=".stub.StubProcess1"  android:process=":p1"  android:exported="false" />
+        <service android:name=".stub.StubProcess2"  android:process=":p2"  android:exported="false" />
+        <service android:name=".stub.StubProcess3"  android:process=":p3"  android:exported="false" />
+        <service android:name=".stub.StubProcess4"  android:process=":p4"  android:exported="false" />
+        <service android:name=".stub.StubProcess5"  android:process=":p5"  android:exported="false" />
+        <service android:name=".stub.StubProcess6"  android:process=":p6"  android:exported="false" />
+        <service android:name=".stub.StubProcess7"  android:process=":p7"  android:exported="false" />
+        <service android:name=".stub.StubProcess8"  android:process=":p8"  android:exported="false" />
+        <service android:name=".stub.StubProcess9"  android:process=":p9"  android:exported="false" />
+
+        <!-- ── Virtual Activity stubs (A0–A29) ─────────────────────────────── -->
+        <activity android:name=".stub.StubActivity$A0"  android:process=":p0"  android:exported="false" android:taskAffinity="" />
+        <activity android:name=".stub.StubActivity$A1"  android:process=":p1"  android:exported="false" android:taskAffinity="" />
+        <activity android:name=".stub.StubActivity$A2"  android:process=":p2"  android:exported="false" android:taskAffinity="" />
+        <activity android:name=".stub.StubActivity$A3"  android:process=":p3"  android:exported="false" android:taskAffinity="" />
+        <activity android:name=".stub.StubActivity$A4"  android:process=":p4"  android:exported="false" android:taskAffinity="" />
+        <activity android:name=".stub.StubActivity$A5"  android:process=":p5"  android:exported="false" android:taskAffinity="" />
+        <activity android:name=".stub.StubActivity$A6"  android:process=":p6"  android:exported="false" android:taskAffinity="" />
+        <activity android:name=".stub.StubActivity$A7"  android:process=":p7"  android:exported="false" android:taskAffinity="" />
+        <activity android:name=".stub.StubActivity$A8"  android:process=":p8"  android:exported="false" android:taskAffinity="" />
+        <activity android:name=".stub.StubActivity$A9"  android:process=":p9"  android:exported="false" android:taskAffinity="" />
+
+        <!-- ── Virtual BroadcastReceiver stubs ─────────────────────────────── -->
+        <receiver android:name=".stub.StubReceiver$R0" android:exported="false" android:process=":p0" />
+        <receiver android:name=".stub.StubReceiver$R1" android:exported="false" android:process=":p1" />
+        <receiver android:name=".stub.StubReceiver$R2" android:exported="false" android:process=":p2" />
+        <receiver android:name=".stub.StubReceiver$R3" android:exported="false" android:process=":p3" />
+        <receiver android:name=".stub.StubReceiver$R4" android:exported="false" android:process=":p4" />
+
+        <!-- ── Virtual ContentProvider stubs ───────────────────────────────── -->
+        <provider
+            android:name=".stub.StubContentProvider"
+            android:authorities="${applicationId}.virtual.provider"
+            android:exported="false"
+            android:multiprocess="false"
+            android:process=":engine" />
+
+        <!-- ── Boot receiver ────────────────────────────────────────────────── -->
+        <receiver
+            android:name=".receiver.BootReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter android:priority="1000">
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </receiver>
+
+        <!-- ── Package events receiver ──────────────────────────────────────── -->
+        <receiver
+            android:name=".receiver.PackageEventReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.PACKAGE_ADDED" />
+                <action android:name="android.intent.action.PACKAGE_REMOVED" />
+                <action android:name="android.intent.action.PACKAGE_REPLACED" />
+                <data android:scheme="package" />
+            </intent-filter>
+        </receiver>
+
+        <!-- ── Main dashboard Activity ──────────────────────────────────────── -->
+        <activity
+            android:name=".ui.dashboard.DashboardActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- ── Clone wizard Activity ─────────────────────────────────────────── -->
+        <activity
+            android:name=".ui.clone.CloneWizardActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!-- ── Settings Activity ─────────────────────────────────────────────── -->
+        <activity
+            android:name=".ui.settings.SettingsActivity"
+            android:exported="false"
+            android:launchMode="singleTop" />
+
+        <!-- ── Permission rationale Activity ─────────────────────────────────── -->
+        <activity
+            android:name=".ui.PermissionActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- ── FileProvider for APK sharing during clone ─────────────────────── -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!-- ── WorkManager initializer ────────────────────────────────────────── -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.work.WorkManagerInitializer"
+                android:value="androidx.startup" />
+        </provider>
+
+    </application>
+</manifest>
