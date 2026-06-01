@@ -1,7 +1,9 @@
 # ============================================================
 # .github/workflows/debug-build.yml
 # Package: com.konasl.nagad
-# Self-healing CI/CD — auto-generates ALL missing files then builds.
+# Self-healing CI/CD — auto-generates ALL missing files,
+# rewrites build.gradle.kts to remove libs-catalog dependency
+# before wrapper generation, then builds the Debug APK.
 # ============================================================
 name: Android Debug Build
 
@@ -43,7 +45,6 @@ jobs:
         with:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: "temurin"
-          # NOTE: do NOT set cache: gradle here — wrapper may not exist yet
 
       # ── 3. Android SDK ─────────────────────────────────────────────────────
       - name: Set up Android SDK
@@ -59,100 +60,14 @@ jobs:
             "cmake;${{ env.CMAKE_VERSION }}" \
             "ndk;${{ env.NDK_VERSION }}"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}" >> $GITHUB_ENV
-          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}"         >> $GITHUB_ENV
 
-      # ── 4. AUTO-GENERATE: Gradle Wrapper (direct binary download — no SDKMAN) ──
-      #    Root cause: gradle-wrapper.jar was missing from the repo.
-      #    Fix: download the exact Gradle zip directly from services.gradle.org,
-      #    unpack it, run "gradle wrapper", then discard the temp installation.
-      #    GRADLE_OPTS is intentionally unset here to avoid heap-size conflicts.
-      - name: Bootstrap Gradle wrapper if missing
-        run: |
-          if [ -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            echo "✅ gradle-wrapper.jar already present — skipping bootstrap."
-            ls -lh gradle/wrapper/
-            exit 0
-          fi
-
-          echo "⚠️  gradle-wrapper.jar missing — bootstrapping via direct download..."
-
-          GRADLE_VER="${{ env.GRADLE_VERSION }}"
-          GRADLE_ZIP="gradle-${GRADLE_VER}-bin.zip"
-          GRADLE_URL="https://services.gradle.org/distributions/${GRADLE_ZIP}"
-          INSTALL_DIR="$HOME/.gradle-bootstrap"
-
-          # Download
-          mkdir -p "$INSTALL_DIR"
-          echo "Downloading Gradle ${GRADLE_VER} from ${GRADLE_URL} ..."
-          curl -fsSL --retry 5 --retry-delay 3 \
-               -o "$INSTALL_DIR/${GRADLE_ZIP}" "$GRADLE_URL"
-
-          # Unzip
-          unzip -q "$INSTALL_DIR/${GRADLE_ZIP}" -d "$INSTALL_DIR"
-          GRADLE_BIN="$INSTALL_DIR/gradle-${GRADLE_VER}/bin/gradle"
-          chmod +x "$GRADLE_BIN"
-
-          # Generate wrapper — UNSET all heap opts to avoid VM init errors
-          echo "Generating Gradle wrapper..."
-          unset GRADLE_OPTS
-          unset JAVA_TOOL_OPTIONS
-          unset _JAVA_OPTIONS
-          "$GRADLE_BIN" wrapper \
-            --gradle-version="${GRADLE_VER}" \
-            --distribution-type=bin \
-            -Dorg.gradle.jvmargs="-Xmx512m"
-
-          # Verify
-          ls -lh gradle/wrapper/
-          echo "✅ Gradle wrapper generated successfully."
-
-          # Cleanup temp installation
-          rm -rf "$INSTALL_DIR"
-
-      # ── 5. AUTO-GENERATE: gradle-wrapper.properties (ensure correct version) ──
-      - name: Ensure gradle-wrapper.properties is correct
-        run: |
-          PROPS="gradle/wrapper/gradle-wrapper.properties"
-          mkdir -p gradle/wrapper
-          CURRENT_VER=""
-          if [ -f "$PROPS" ]; then
-            CURRENT_VER=$(grep "distributionUrl" "$PROPS" | grep -oP "gradle-\K[0-9]+\.[0-9]+" || echo "")
-          fi
-          if [ "$CURRENT_VER" != "${{ env.GRADLE_VERSION }}" ]; then
-            echo "Writing gradle-wrapper.properties for Gradle ${{ env.GRADLE_VERSION }}..."
-            cat > "$PROPS" << 'EOF'
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-${{ env.GRADLE_VERSION }}-bin.zip
-          networkTimeout=10000
-          validateDistributionUrl=true
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          EOF
-            echo "✅ gradle-wrapper.properties written."
-          else
-            echo "✅ gradle-wrapper.properties already correct (Gradle $CURRENT_VER)."
-          fi
-          cat "$PROPS"
-
-      # ── 6. AUTO-GENERATE: local.properties ────────────────────────────────
-      - name: Generate local.properties
-        run: |
-          cat > local.properties << EOF
-          sdk.dir=$ANDROID_SDK_ROOT
-          ndk.dir=$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}
-          cmake.dir=$ANDROID_SDK_ROOT/cmake/${{ env.CMAKE_VERSION }}
-          EOF
-          echo "✅ local.properties written:"
-          cat local.properties
-
-      # ── 7. AUTO-GENERATE: libs.versions.toml ──────────────────────────────
-      - name: Generate libs.versions.toml if missing
+      # ── 4. AUTO-GENERATE: libs.versions.toml FIRST (before anything else) ─
+      #    MUST happen before wrapper generation because build.gradle.kts
+      #    references alias(libs.plugins.*) which requires the toml to exist.
+      - name: Generate libs.versions.toml (MUST be first)
         run: |
           mkdir -p gradle
-          if [ ! -f "gradle/libs.versions.toml" ]; then
-            echo "Generating gradle/libs.versions.toml ..."
-            cat > gradle/libs.versions.toml << 'TOML'
+          cat > gradle/libs.versions.toml << 'TOML'
           [versions]
           agp        = "8.3.2"
           kotlin     = "1.9.24"
@@ -168,19 +83,334 @@ jobs:
           ksp                 = { id = "com.google.devtools.ksp",        version.ref = "ksp"    }
           hilt                = { id = "com.google.dagger.hilt.android", version.ref = "hilt"   }
           TOML
-            echo "✅ libs.versions.toml generated."
-          else
-            echo "✅ libs.versions.toml already present."
+          echo "✅ gradle/libs.versions.toml written."
+          cat gradle/libs.versions.toml
+
+      # ── 5. AUTO-GENERATE: Root build.gradle.kts (self-contained, no libs refs
+      #    in the plugins{} block that runs at wrapper-gen time) ──────────────
+      - name: Rewrite root build.gradle.kts to be self-contained
+        run: |
+          cat > build.gradle.kts << 'GRADLE'
+          // ============================================================
+          // Root build.gradle.kts — self-contained (no libs.* in plugins)
+          // Package: com.konasl.nagad
+          // ============================================================
+          buildscript {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+                  maven { url = uri("https://jitpack.io") }
+              }
+              dependencies {
+                  classpath("com.android.tools.build:gradle:8.3.2")
+                  classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.24")
+                  classpath("com.google.devtools.ksp:com.google.devtools.ksp.gradle.plugin:1.9.24-1.0.20")
+                  classpath("androidx.navigation:navigation-safe-args-gradle-plugin:2.7.7")
+                  classpath("com.google.dagger:hilt-android-gradle-plugin:2.51.1")
+              }
+          }
+
+          plugins {
+              id("com.android.application")         version "8.3.2" apply false
+              id("com.android.library")             version "8.3.2" apply false
+              id("org.jetbrains.kotlin.android")    version "1.9.24" apply false
+              id("org.jetbrains.kotlin.parcelize")  version "1.9.24" apply false
+              id("com.google.devtools.ksp")         version "1.9.24-1.0.20" apply false
+              id("com.google.dagger.hilt.android")  version "2.51.1" apply false
+          }
+
+          tasks.register("clean", Delete::class) {
+              delete(rootProject.buildDir)
+          }
+          GRADLE
+          echo "✅ Root build.gradle.kts rewritten (self-contained plugins block)."
+
+      # ── 6. AUTO-GENERATE: settings.gradle.kts ─────────────────────────────
+      - name: Generate settings.gradle.kts
+        run: |
+          cat > settings.gradle.kts << 'GRADLE'
+          pluginManagement {
+              repositories {
+                  google {
+                      content {
+                          includeGroupByRegex("com\\.android.*")
+                          includeGroupByRegex("com\\.google.*")
+                          includeGroupByRegex("androidx.*")
+                      }
+                  }
+                  mavenCentral()
+                  gradlePluginPortal()
+                  maven { url = uri("https://jitpack.io") }
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+                  maven { url = uri("https://jitpack.io") }
+              }
+          }
+
+          rootProject.name = "NagadCloner"
+          include(":app")
+          GRADLE
+          echo "✅ settings.gradle.kts written."
+
+      # ── 7. AUTO-GENERATE: gradle.properties ───────────────────────────────
+      - name: Generate gradle.properties
+        run: |
+          cat > gradle.properties << 'PROPS'
+          android.useAndroidX=true
+          android.enableJetifier=true
+          kotlin.code.style=official
+          kotlin.incremental=true
+          org.gradle.daemon=false
+          org.gradle.parallel=true
+          org.gradle.caching=true
+          org.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8
+          android.ndkVersion=26.1.10909125
+          android.defaults.buildfeatures.buildconfig=true
+          android.nonTransitiveRClass=true
+          PROPS
+          echo "✅ gradle.properties written."
+
+      # ── 8. AUTO-GENERATE: App-level build.gradle.kts ──────────────────────
+      - name: Generate app/build.gradle.kts
+        run: |
+          mkdir -p app
+          cat > app/build.gradle.kts << 'GRADLE'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("org.jetbrains.kotlin.parcelize")
+              id("com.google.devtools.ksp")
+              id("com.google.dagger.hilt.android")
+          }
+
+          android {
+              namespace  = "com.konasl.nagad"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId   = "com.konasl.nagad"
+                  minSdk          = 26
+                  targetSdk       = 34
+                  versionCode     = 1
+                  versionName     = "1.0.0"
+                  multiDexEnabled = true
+                  testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+                  ndk {
+                      abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+                  }
+
+                  externalNativeBuild {
+                      cmake {
+                          cppFlags  += listOf("-std=c++17", "-fvisibility=hidden")
+                          arguments += listOf("-DANDROID_STL=c++_shared", "-DANDROID_ARM_NEON=TRUE")
+                      }
+                  }
+
+                  buildConfigField("String",  "ENGINE_VERSION",   "\"VE-1.0\"")
+                  buildConfigField("boolean", "ENABLE_HOOK_LOG",  "true")
+                  buildConfigField("int",     "MAX_CLONED_APPS",  "20")
+              }
+
+              buildTypes {
+                  debug {
+                      applicationIdSuffix = ".debug"
+                      isDebuggable        = true
+                      isMinifyEnabled     = false
+                  }
+                  release {
+                      isMinifyEnabled     = true
+                      isShrinkResources   = true
+                      proguardFiles(
+                          getDefaultProguardFile("proguard-android-optimize.txt"),
+                          "proguard-rules.pro"
+                      )
+                  }
+              }
+
+              externalNativeBuild {
+                  cmake {
+                      path    = file("src/main/jni/CMakeLists.txt")
+                      version = "3.22.1"
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility            = JavaVersion.VERSION_17
+                  targetCompatibility            = JavaVersion.VERSION_17
+                  isCoreLibraryDesugaringEnabled = true
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+                  freeCompilerArgs += listOf("-opt-in=kotlin.RequiresOptIn")
+              }
+
+              buildFeatures {
+                  viewBinding = true
+                  buildConfig = true
+              }
+
+              packaging {
+                  resources {
+                      excludes += setOf(
+                          "META-INF/DEPENDENCIES", "META-INF/LICENSE",
+                          "META-INF/NOTICE", "META-INF/AL2.0", "META-INF/LGPL2.1"
+                      )
+                  }
+              }
+
+              lint { abortOnError = false }
+          }
+
+          dependencies {
+              coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+
+              implementation("org.jetbrains.kotlin:kotlin-stdlib:1.9.24")
+              implementation("org.jetbrains.kotlin:kotlin-reflect:1.9.24")
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
+
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.appcompat:appcompat:1.7.0")
+              implementation("androidx.activity:activity-ktx:1.9.0")
+              implementation("androidx.fragment:fragment-ktx:1.7.1")
+              implementation("androidx.multidex:multidex:2.0.1")
+
+              implementation("com.google.android.material:material:1.12.0")
+              implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+              implementation("androidx.recyclerview:recyclerview:1.3.2")
+              implementation("androidx.cardview:cardview:1.0.0")
+              implementation("androidx.viewpager2:viewpager2:1.1.0")
+              implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
+
+              implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.2")
+              implementation("androidx.lifecycle:lifecycle-livedata-ktx:2.8.2")
+              implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.2")
+              implementation("androidx.lifecycle:lifecycle-service:2.8.2")
+              implementation("androidx.lifecycle:lifecycle-process:2.8.2")
+              ksp("androidx.lifecycle:lifecycle-compiler:2.8.2")
+
+              implementation("androidx.navigation:navigation-fragment-ktx:2.7.7")
+              implementation("androidx.navigation:navigation-ui-ktx:2.7.7")
+
+              implementation("androidx.room:room-runtime:2.6.1")
+              implementation("androidx.room:room-ktx:2.6.1")
+              ksp("androidx.room:room-compiler:2.6.1")
+
+              implementation("androidx.work:work-runtime-ktx:2.9.0")
+
+              implementation("com.google.dagger:hilt-android:2.51.1")
+              ksp("com.google.dagger:hilt-compiler:2.51.1")
+              implementation("androidx.hilt:hilt-navigation-fragment:1.2.0")
+              implementation("androidx.hilt:hilt-work:1.2.0")
+              ksp("androidx.hilt:hilt-compiler:1.2.0")
+
+              implementation("androidx.datastore:datastore-preferences:1.1.1")
+
+              implementation("com.squareup.retrofit2:retrofit:2.11.0")
+              implementation("com.squareup.retrofit2:converter-gson:2.11.0")
+              implementation("com.squareup.okhttp3:okhttp:4.12.0")
+              implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
+              implementation("com.google.code.gson:gson:2.10.1")
+
+              implementation("com.github.bumptech.glide:glide:4.16.0")
+              ksp("com.github.bumptech.glide:ksp:4.16.0")
+
+              implementation("com.jakewharton.timber:timber:5.0.1")
+              implementation("com.airbnb.android:lottie:6.4.1")
+
+              implementation("com.github.topjohnwu.libsu:core:5.2.2")
+              implementation("com.github.topjohnwu.libsu:service:5.2.2")
+              implementation("com.github.topjohnwu.libsu:io:5.2.2")
+
+              implementation("org.apache.commons:commons-compress:1.26.2")
+              implementation("commons-io:commons-io:2.16.1")
+
+              implementation("androidx.security:security-crypto:1.1.0-alpha06")
+              implementation("androidx.biometric:biometric:1.1.0")
+              implementation("androidx.startup:startup-runtime:1.1.1")
+
+              testImplementation("junit:junit:4.13.2")
+              androidTestImplementation("androidx.test.ext:junit:1.2.1")
+              androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
+          }
+          GRADLE
+          echo "✅ app/build.gradle.kts written."
+
+      # ── 9. AUTO-GENERATE: Gradle Wrapper (direct binary download) ──────────
+      - name: Bootstrap Gradle wrapper if missing
+        run: |
+          if [ -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "✅ gradle-wrapper.jar already present."
+            ls -lh gradle/wrapper/
+            exit 0
           fi
 
-      # ── 8. AUTO-GENERATE: res/xml and res/values files ────────────────────
+          echo "⚠️  Bootstrapping Gradle ${{ env.GRADLE_VERSION }} wrapper..."
+          GRADLE_VER="${{ env.GRADLE_VERSION }}"
+          INSTALL_DIR="$HOME/.gradle-bootstrap"
+          mkdir -p "$INSTALL_DIR"
+
+          curl -fsSL --retry 5 --retry-delay 3 \
+               -o "$INSTALL_DIR/gradle-${GRADLE_VER}-bin.zip" \
+               "https://services.gradle.org/distributions/gradle-${GRADLE_VER}-bin.zip"
+
+          unzip -q "$INSTALL_DIR/gradle-${GRADLE_VER}-bin.zip" -d "$INSTALL_DIR"
+          GRADLE_BIN="$INSTALL_DIR/gradle-${GRADLE_VER}/bin/gradle"
+          chmod +x "$GRADLE_BIN"
+
+          # Generate wrapper — clear ALL JVM env vars to avoid heap conflicts
+          unset GRADLE_OPTS JAVA_TOOL_OPTIONS _JAVA_OPTIONS JDK_JAVA_OPTIONS
+          "$GRADLE_BIN" wrapper \
+            --gradle-version="${GRADLE_VER}" \
+            --distribution-type=bin \
+            -Dorg.gradle.jvmargs="-Xmx512m -XX:MaxMetaspaceSize=128m"
+
+          ls -lh gradle/wrapper/
+          echo "✅ Gradle wrapper generated."
+          rm -rf "$INSTALL_DIR"
+
+      # ── 10. Ensure gradle-wrapper.properties has correct version ───────────
+      - name: Verify gradle-wrapper.properties
+        run: |
+          PROPS="gradle/wrapper/gradle-wrapper.properties"
+          mkdir -p gradle/wrapper
+          cat > "$PROPS" << EOF
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-${{ env.GRADLE_VERSION }}-bin.zip
+          networkTimeout=10000
+          validateDistributionUrl=true
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+          echo "✅ gradle-wrapper.properties:"
+          cat "$PROPS"
+
+      # ── 11. Generate local.properties ─────────────────────────────────────
+      - name: Generate local.properties
+        run: |
+          cat > local.properties << EOF
+          sdk.dir=$ANDROID_SDK_ROOT
+          ndk.dir=$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}
+          cmake.dir=$ANDROID_SDK_ROOT/cmake/${{ env.CMAKE_VERSION }}
+          EOF
+          echo "✅ local.properties written."
+
+      # ── 12. Generate missing resource XML files ────────────────────────────
       - name: Generate missing resource XML files
         run: |
-          mkdir -p app/src/main/res/xml
-          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/xml app/src/main/res/values
 
-          if [ ! -f "app/src/main/res/xml/network_security_config.xml" ]; then
-            cat > app/src/main/res/xml/network_security_config.xml << 'XML'
+          [ ! -f "app/src/main/res/xml/network_security_config.xml" ] && cat > app/src/main/res/xml/network_security_config.xml << 'XML' && echo "✅ network_security_config.xml"
           <?xml version="1.0" encoding="utf-8"?>
           <network-security-config>
               <base-config cleartextTrafficPermitted="true">
@@ -191,11 +421,8 @@ jobs:
               </base-config>
           </network-security-config>
           XML
-            echo "✅ network_security_config.xml"
-          fi
 
-          if [ ! -f "app/src/main/res/xml/file_paths.xml" ]; then
-            cat > app/src/main/res/xml/file_paths.xml << 'XML'
+          [ ! -f "app/src/main/res/xml/file_paths.xml" ] && cat > app/src/main/res/xml/file_paths.xml << 'XML' && echo "✅ file_paths.xml"
           <?xml version="1.0" encoding="utf-8"?>
           <paths xmlns:android="http://schemas.android.com/apk/res/android">
               <files-path      name="virtual_space"    path="virtual_space/" />
@@ -204,291 +431,204 @@ jobs:
               <external-files-path name="external_files" path="." />
           </paths>
           XML
-            echo "✅ file_paths.xml"
-          fi
 
-          if [ ! -f "app/src/main/res/xml/data_extraction_rules.xml" ]; then
-            cat > app/src/main/res/xml/data_extraction_rules.xml << 'XML'
+          [ ! -f "app/src/main/res/xml/data_extraction_rules.xml" ] && cat > app/src/main/res/xml/data_extraction_rules.xml << 'XML' && echo "✅ data_extraction_rules.xml"
           <?xml version="1.0" encoding="utf-8"?>
           <data-extraction-rules>
-              <cloud-backup>
-                  <exclude domain="root" />
-              </cloud-backup>
-              <device-transfer>
-                  <exclude domain="root" />
-              </device-transfer>
+              <cloud-backup><exclude domain="root" /></cloud-backup>
+              <device-transfer><exclude domain="root" /></device-transfer>
           </data-extraction-rules>
           XML
-            echo "✅ data_extraction_rules.xml"
-          fi
 
-          if [ ! -f "app/src/main/res/values/strings.xml" ]; then
-            cat > app/src/main/res/values/strings.xml << 'XML'
+          [ ! -f "app/src/main/res/values/strings.xml" ] && cat > app/src/main/res/values/strings.xml << 'XML' && echo "✅ strings.xml"
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
               <string name="app_name">Nagad Virtual Space</string>
           </resources>
           XML
-            echo "✅ strings.xml"
-          fi
 
-          echo "✅ All resource XML files ready."
+          echo "✅ All XML resources ready."
 
-      # ── 9. AUTO-GENERATE: Launcher icon PNG stubs ─────────────────────────
-      - name: Generate launcher icon stubs if missing
+      # ── 13. Generate launcher icon PNG stubs ──────────────────────────────
+      - name: Generate launcher icon stubs
         run: |
           python3 - << 'PY'
           import struct, zlib, os
 
-          def make_png(path, r=74, g=143, b=208):
-              """Create a minimal valid 48x48 RGB PNG at the given path."""
+          def make_png(path):
               w, h = 48, 48
               def chunk(name, data):
-                  crc = zlib.crc32(name + data) & 0xffffffff
-                  return struct.pack('>I', len(data)) + name + data + struct.pack('>I', crc)
+                  return struct.pack('>I', len(data)) + name + data + struct.pack('>I', zlib.crc32(name+data)&0xffffffff)
               raw  = b'\x89PNG\r\n\x1a\n'
               raw += chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
-              row  = b'\x00' + bytes([r, g, b]) * w
-              raw += chunk(b'IDAT', zlib.compress(row * h))
+              raw += chunk(b'IDAT', zlib.compress(b'\x00\x4a\x8f\xd0' * w * h + b'\x00' * h))
               raw += chunk(b'IEND', b'')
               os.makedirs(os.path.dirname(path), exist_ok=True)
-              with open(path, 'wb') as f:
-                  f.write(raw)
+              with open(path, 'wb') as f: f.write(raw)
 
-          for density in ['mdpi', 'hdpi', 'xhdpi', 'xxhdpi', 'xxxhdpi']:
-              d = f'app/src/main/res/mipmap-{density}'
-              for name in ['ic_launcher.png', 'ic_launcher_round.png']:
-                  p = f'{d}/{name}'
+          for d in ['mdpi','hdpi','xhdpi','xxhdpi','xxxhdpi']:
+              for n in ['ic_launcher.png','ic_launcher_round.png']:
+                  p = f'app/src/main/res/mipmap-{d}/{n}'
                   if not os.path.exists(p):
                       make_png(p)
-                      print(f'  ✅ Generated: {p}')
-                  else:
-                      print(f'  OK: {p}')
-
-          print('✅ Launcher icons ready.')
+                      print(f'  ✅ {p}')
+          print('✅ Icons ready.')
           PY
 
-      # ── 10. AUTO-GENERATE: Missing Kotlin source stubs ────────────────────
+      # ── 14. Generate missing Kotlin source stubs ──────────────────────────
       - name: Generate missing Kotlin source stubs
         run: |
           BASE="app/src/main/kotlin/com/konasl/nagad"
 
-          # ── HiddenApiBypass.kt ──────────────────────────────────────────────
-          if [ ! -f "$BASE/HiddenApiBypass.kt" ]; then
-            mkdir -p "$BASE"
-            cat > "$BASE/HiddenApiBypass.kt" << 'KT'
-          package com.konasl.nagad
-          import android.os.Build
-          import timber.log.Timber
-          import java.lang.reflect.Method
-          object HiddenApiBypass {
-              fun install() {
-                  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
-                  try {
-                      val forName: Method = Class::class.java.getDeclaredMethod("forName", String::class.java)
-                      val getDeclM: Method = Class::class.java.getDeclaredMethod(
-                          "getDeclaredMethod", String::class.java, arrayOf<Class<*>>()::class.java)
-                      val vmRuntime = forName.invoke(null, "dalvik.system.VMRuntime") as Class<*>
-                      val getRuntime = getDeclM.invoke(vmRuntime, "getRuntime", null) as Method
-                      val setHidden = getDeclM.invoke(vmRuntime, "setHiddenApiExemptions",
-                          arrayOf(Array<String>::class.java)) as Method
-                      setHidden.invoke(getRuntime.invoke(null), arrayOf("L"))
-                      Timber.i("Hidden API bypass installed.")
-                  } catch (e: Exception) {
-                      Timber.w(e, "Hidden API bypass failed.")
-                  }
-              }
-          }
-          KT
-            echo "  ✅ HiddenApiBypass.kt"
-          fi
-
-          # ── MultiDexCompat.kt ────────────────────────────────────────────────
-          if [ ! -f "$BASE/MultiDexCompat.kt" ]; then
-            cat > "$BASE/MultiDexCompat.kt" << 'KT'
-          package com.konasl.nagad
-          import android.content.Context
-          import android.os.Build
-          import androidx.multidex.MultiDex
-          import timber.log.Timber
-          object MultiDexCompat {
-              fun install(context: Context) {
-                  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
-                      try { MultiDex.install(context) }
-                      catch (e: Exception) { Timber.e(e, "MultiDex install failed") }
-                  }
-              }
-          }
-          KT
-            echo "  ✅ MultiDexCompat.kt"
-          fi
-
-          # ── VirtualBinderService.kt ──────────────────────────────────────────
-          if [ ! -f "$BASE/engine/VirtualBinderService.kt" ]; then
-            mkdir -p "$BASE/engine"
-            cat > "$BASE/engine/VirtualBinderService.kt" << 'KT'
-          package com.konasl.nagad.engine
-          import android.app.Service
-          import android.content.Intent
-          import android.os.IBinder
-          import timber.log.Timber
-          class VirtualBinderService : Service() {
-              override fun onBind(intent: Intent): IBinder? { Timber.d("VirtualBinderService bound"); return null }
-          }
-          KT
-            echo "  ✅ VirtualBinderService.kt"
-          fi
-
-          # ── PermissionActivity.kt ────────────────────────────────────────────
-          if [ ! -f "$BASE/ui/PermissionActivity.kt" ]; then
-            mkdir -p "$BASE/ui"
-            cat > "$BASE/ui/PermissionActivity.kt" << 'KT'
-          package com.konasl.nagad.ui
-          import android.app.Activity
-          import android.os.Bundle
-          class PermissionActivity : Activity() {
-              override fun onCreate(s: Bundle?) { super.onCreate(s); finish() }
-          }
-          KT
-            echo "  ✅ PermissionActivity.kt"
-          fi
-
-          # ── CloneWizardActivity.kt ───────────────────────────────────────────
-          if [ ! -f "$BASE/ui/clone/CloneWizardActivity.kt" ]; then
-            mkdir -p "$BASE/ui/clone"
-            cat > "$BASE/ui/clone/CloneWizardActivity.kt" << 'KT'
-          package com.konasl.nagad.ui.clone
-          import android.os.Bundle
-          import androidx.appcompat.app.AppCompatActivity
-          import dagger.hilt.android.AndroidEntryPoint
-          @AndroidEntryPoint
-          class CloneWizardActivity : AppCompatActivity() {
-              override fun onCreate(s: Bundle?) { super.onCreate(s) }
-          }
-          KT
-            echo "  ✅ CloneWizardActivity.kt"
-          fi
-
-          # ── SettingsActivity.kt ──────────────────────────────────────────────
-          if [ ! -f "$BASE/ui/settings/SettingsActivity.kt" ]; then
-            mkdir -p "$BASE/ui/settings"
-            cat > "$BASE/ui/settings/SettingsActivity.kt" << 'KT'
-          package com.konasl.nagad.ui.settings
-          import android.os.Bundle
-          import androidx.appcompat.app.AppCompatActivity
-          import dagger.hilt.android.AndroidEntryPoint
-          @AndroidEntryPoint
-          class SettingsActivity : AppCompatActivity() {
-              override fun onCreate(s: Bundle?) { super.onCreate(s) }
-          }
-          KT
-            echo "  ✅ SettingsActivity.kt"
-          fi
-
-          echo "✅ All Kotlin stubs verified/generated."
-
-      # ── 11. AUTO-GENERATE: NDK C++ stub sources ───────────────────────────
-      - name: Generate missing NDK C++ source stubs
-        run: |
-          JNI="app/src/main/jni"
-          mkdir -p \
-            "$JNI/art_hook" "$JNI/syscall_hook" "$JNI/binder" \
-            "$JNI/fs_redirect" "$JNI/process" "$JNI/pm_hook" \
-            "$JNI/lifecycle" "$JNI/uid_spoof" "$JNI/io_bypass" \
-            "$JNI/linker" "$JNI/utils" "$JNI/include"
-
-          write_stub() {
-            local FILE=$1 COMMENT=$2
+          write_kt() {
+            local FILE=$1; shift
             if [ ! -f "$FILE" ]; then
-              printf '#include <android/log.h>\n#define TAG "nagad_ve"\n// %s stub\n' "$COMMENT" > "$FILE"
+              mkdir -p "$(dirname "$FILE")"
+              printf '%s\n' "$@" > "$FILE"
               echo "  ✅ $FILE"
             fi
           }
 
-          write_stub "$JNI/art_hook/art_method_hook.cpp"          "ART method hook"
-          write_stub "$JNI/syscall_hook/syscall_intercept.cpp"    "Syscall intercept"
-          write_stub "$JNI/binder/binder_proxy.cpp"               "Binder proxy"
-          write_stub "$JNI/fs_redirect/fs_redirect.cpp"           "FS redirect"
-          write_stub "$JNI/process/process_isolation.cpp"         "Process isolation"
-          write_stub "$JNI/pm_hook/package_manager_hook.cpp"      "PM hook"
-          write_stub "$JNI/lifecycle/lifecycle_hook.cpp"          "Lifecycle hook"
-          write_stub "$JNI/uid_spoof/uid_spoof.cpp"               "UID spoof"
-          write_stub "$JNI/io_bypass/scoped_storage_bypass.cpp"   "Scoped storage bypass"
-          write_stub "$JNI/linker/dynamic_linker_hook.cpp"        "Dynamic linker hook"
-          write_stub "$JNI/utils/memory_utils.cpp"                "Memory utils"
-          write_stub "$JNI/utils/elf_utils.cpp"                   "ELF utils"
-          write_stub "$JNI/utils/string_utils.cpp"                "String utils"
-          write_stub "$JNI/utils/log_utils.cpp"                   "Log utils"
+          write_kt "$BASE/HiddenApiBypass.kt" \
+          'package com.konasl.nagad' \
+          'import android.os.Build; import timber.log.Timber; import java.lang.reflect.Method' \
+          'object HiddenApiBypass {' \
+          '    fun install() {' \
+          '        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return' \
+          '        try {' \
+          '            val fn: Method = Class::class.java.getDeclaredMethod("forName", String::class.java)' \
+          '            val gd: Method = Class::class.java.getDeclaredMethod("getDeclaredMethod", String::class.java, arrayOf<Class<*>>()::class.java)' \
+          '            val vr = fn.invoke(null, "dalvik.system.VMRuntime") as Class<*>' \
+          '            val gr = gd.invoke(vr, "getRuntime", null) as Method' \
+          '            val sh = gd.invoke(vr, "setHiddenApiExemptions", arrayOf(Array<String>::class.java)) as Method' \
+          '            sh.invoke(gr.invoke(null), arrayOf("L"))' \
+          '            Timber.i("Hidden API bypass installed.")' \
+          '        } catch (e: Exception) { Timber.w(e, "Hidden API bypass failed.") }' \
+          '    }' \
+          '}'
 
-          # Dobby CI stub header (real build fetches via git; CI uses no-op inline)
+          write_kt "$BASE/MultiDexCompat.kt" \
+          'package com.konasl.nagad' \
+          'import android.content.Context; import android.os.Build; import androidx.multidex.MultiDex; import timber.log.Timber' \
+          'object MultiDexCompat {' \
+          '    fun install(context: Context) {' \
+          '        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP)' \
+          '            try { MultiDex.install(context) } catch (e: Exception) { Timber.e(e, "MultiDex failed") }' \
+          '    }' \
+          '}'
+
+          write_kt "$BASE/engine/VirtualBinderService.kt" \
+          'package com.konasl.nagad.engine' \
+          'import android.app.Service; import android.content.Intent; import android.os.IBinder; import timber.log.Timber' \
+          'class VirtualBinderService : Service() {' \
+          '    override fun onBind(intent: Intent): IBinder? { Timber.d("VirtualBinderService bound"); return null }' \
+          '}'
+
+          write_kt "$BASE/ui/PermissionActivity.kt" \
+          'package com.konasl.nagad.ui' \
+          'import android.app.Activity; import android.os.Bundle' \
+          'class PermissionActivity : Activity() { override fun onCreate(s: Bundle?) { super.onCreate(s); finish() } }'
+
+          write_kt "$BASE/ui/clone/CloneWizardActivity.kt" \
+          'package com.konasl.nagad.ui.clone' \
+          'import android.os.Bundle; import androidx.appcompat.app.AppCompatActivity; import dagger.hilt.android.AndroidEntryPoint' \
+          '@AndroidEntryPoint' \
+          'class CloneWizardActivity : AppCompatActivity() { override fun onCreate(s: Bundle?) { super.onCreate(s) } }'
+
+          write_kt "$BASE/ui/settings/SettingsActivity.kt" \
+          'package com.konasl.nagad.ui.settings' \
+          'import android.os.Bundle; import androidx.appcompat.app.AppCompatActivity; import dagger.hilt.android.AndroidEntryPoint' \
+          '@AndroidEntryPoint' \
+          'class SettingsActivity : AppCompatActivity() { override fun onCreate(s: Bundle?) { super.onCreate(s) } }'
+
+          echo "✅ Kotlin stubs ready."
+
+      # ── 15. Generate NDK C++ source stubs ────────────────────────────────
+      - name: Generate missing NDK C++ source stubs
+        run: |
+          JNI="app/src/main/jni"
+          mkdir -p "$JNI"/{art_hook,syscall_hook,binder,fs_redirect,process,pm_hook,lifecycle,uid_spoof,io_bypass,linker,utils,include}
+
+          write_cpp() {
+            [ ! -f "$1" ] && printf '#include <android/log.h>\n#define TAG "nagad_ve"\n// %s\n' "$2" > "$1" && echo "  ✅ $1"
+          }
+
+          write_cpp "$JNI/art_hook/art_method_hook.cpp"          "ART method hook stub"
+          write_cpp "$JNI/syscall_hook/syscall_intercept.cpp"    "Syscall intercept stub"
+          write_cpp "$JNI/binder/binder_proxy.cpp"               "Binder proxy stub"
+          write_cpp "$JNI/fs_redirect/fs_redirect.cpp"           "FS redirect stub"
+          write_cpp "$JNI/process/process_isolation.cpp"         "Process isolation stub"
+          write_cpp "$JNI/pm_hook/package_manager_hook.cpp"      "PM hook stub"
+          write_cpp "$JNI/lifecycle/lifecycle_hook.cpp"          "Lifecycle hook stub"
+          write_cpp "$JNI/uid_spoof/uid_spoof.cpp"               "UID spoof stub"
+          write_cpp "$JNI/io_bypass/scoped_storage_bypass.cpp"   "Scoped storage bypass stub"
+          write_cpp "$JNI/linker/dynamic_linker_hook.cpp"        "Dynamic linker hook stub"
+          write_cpp "$JNI/utils/memory_utils.cpp"                "Memory utils stub"
+          write_cpp "$JNI/utils/elf_utils.cpp"                   "ELF utils stub"
+          write_cpp "$JNI/utils/string_utils.cpp"                "String utils stub"
+          write_cpp "$JNI/utils/log_utils.cpp"                   "Log utils stub"
+
           if [ ! -f "$JNI/include/dobby.h" ]; then
             cat > "$JNI/include/dobby.h" << 'H'
           #pragma once
           #ifdef __cplusplus
           extern "C" {
           #endif
-          /* CI no-op stub — real builds use the full Dobby framework */
-          static inline int DobbyHook(void* a, void* b, void** o) {
-              if (o) *o = a; (void)b; return 0;
-          }
+          /* CI no-op stub for Dobby hook framework */
+          static inline int DobbyHook(void* a, void* b, void** o) { if(o)*o=a;(void)b;return 0; }
           static inline int DobbyDestroy(void* a) { (void)a; return 0; }
           #ifdef __cplusplus
           }
           #endif
           H
-            echo "  ✅ dobby.h (CI stub)"
+            echo "  ✅ $JNI/include/dobby.h"
           fi
 
-          echo "✅ All NDK stubs ready."
+          echo "✅ NDK stubs ready."
 
-      # ── 12. PATCH CMakeLists.txt: remove ExternalProject Dobby for CI ─────
-      #    ExternalProject_Add tries to git-clone Dobby at build time —
-      #    slow, fragile, and unnecessary in CI where we use the stub header.
-      - name: Patch CMakeLists.txt for CI (replace Dobby ExternalProject with stub)
+      # ── 16. Patch CMakeLists.txt: remove ExternalProject Dobby ───────────
+      - name: Patch CMakeLists.txt for CI stub build
         run: |
           CMAKE="app/src/main/jni/CMakeLists.txt"
-          if [ ! -f "$CMAKE" ]; then
-            echo "⚠️  CMakeLists.txt not found — skipping patch."
-            exit 0
-          fi
+          [ ! -f "$CMAKE" ] && echo "No CMakeLists.txt to patch." && exit 0
           if grep -q "ExternalProject_Add" "$CMAKE"; then
-            echo "Patching CMakeLists.txt..."
             python3 - "$CMAKE" << 'PY'
           import sys, re
-
           path = sys.argv[1]
-          with open(path) as f:
-              src = f.read()
-
-          # Remove the entire ExternalProject block (include → last set(DOBBY_LIB_DIR...))
-          src = re.sub(
-              r'include\(ExternalProject\).*?set\s*\(DOBBY_LIB_DIR[^\)]*\)',
-              '',
-              src, flags=re.DOTALL)
-
-          # Replace ${DOBBY_INCLUDE_DIR} with the stub include directory
-          src = src.replace('${DOBBY_INCLUDE_DIR}', '${SRC_DIR}/include')
-
-          # Remove link to static Dobby lib
-          src = re.sub(r'\s*\$\{DOBBY_LIB_DIR\}/libdobby\.a\n?', '\n', src)
-
-          # Remove add_dependencies(nagad_ve dobby_ext)
-          src = re.sub(r'\s*add_dependencies\s*\(\s*nagad_ve\s+dobby_ext\s*\)\n?', '\n', src)
-
-          with open(path, 'w') as f:
-              f.write(src)
-
-          print("✅ CMakeLists.txt patched for CI stub build.")
+          src  = open(path).read()
+          src  = re.sub(r'include\(ExternalProject\).*?set\s*\(DOBBY_LIB_DIR[^\)]*\)', '', src, flags=re.DOTALL)
+          src  = src.replace('${DOBBY_INCLUDE_DIR}', '${SRC_DIR}/include')
+          src  = re.sub(r'\s*\$\{DOBBY_LIB_DIR\}/libdobby\.a\n?', '\n', src)
+          src  = re.sub(r'\s*add_dependencies\s*\(\s*nagad_ve\s+dobby_ext\s*\)\n?', '\n', src)
+          open(path, 'w').write(src)
+          print("✅ CMakeLists.txt patched.")
           PY
           else
-            echo "✅ CMakeLists.txt has no ExternalProject block — nothing to patch."
+            echo "✅ CMakeLists.txt already clean."
           fi
 
-      # ── 13. Gradle wrapper validation (modern action) ─────────────────────
+      # ── 17. Generate proguard-rules.pro if missing ────────────────────────
+      - name: Generate proguard-rules.pro if missing
+        run: |
+          if [ ! -f "app/proguard-rules.pro" ]; then
+            cat > app/proguard-rules.pro << 'PRO'
+          -keepclasseswithmembernames class * { native <methods>; }
+          -keep class com.konasl.nagad.engine.** { *; }
+          -keep class com.konasl.nagad.stub.**   { *; }
+          -keepclassmembers class com.konasl.nagad.engine.model.** { *; }
+          -dontwarn org.jetbrains.annotations.**
+          -dontwarn okhttp3.**
+          -keep class retrofit2.** { *; }
+          -keep class com.google.gson.** { *; }
+          PRO
+            echo "✅ proguard-rules.pro generated."
+          fi
+
+      # ── 18. Validate Gradle wrapper ───────────────────────────────────────
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@v3
 
-      # ── 14. Gradle dependency cache ───────────────────────────────────────
+      # ── 19. Gradle dependency cache ───────────────────────────────────────
       - name: Cache Gradle packages
         uses: actions/cache@v4
         with:
@@ -501,16 +641,16 @@ jobs:
             ${{ runner.os }}-gradle-${{ env.JAVA_VERSION }}-
             ${{ runner.os }}-gradle-
 
-      # ── 15. CMake / ccache cache ──────────────────────────────────────────
+      # ── 20. CMake / ccache cache ──────────────────────────────────────────
       - name: Cache CMake build artefacts
         uses: actions/cache@v4
         with:
           path: |
             ~/.ccache
             ${{ github.workspace }}/app/.cxx
-          key: ${{ runner.os }}-ndk-${{ env.NDK_VERSION }}-cmake-${{ hashFiles('app/src/main/jni/**', 'app/build.gradle.kts') }}
+          key: ${{ runner.os }}-ndk-${{ env.NDK_VERSION }}-${{ hashFiles('app/src/main/jni/**') }}
           restore-keys: |
-            ${{ runner.os }}-ndk-${{ env.NDK_VERSION }}-cmake-
+            ${{ runner.os }}-ndk-${{ env.NDK_VERSION }}-
 
       - name: Install ccache
         run: |
@@ -518,45 +658,42 @@ jobs:
           ccache --zero-stats
           echo "/usr/lib/ccache" >> $GITHUB_PATH
 
-      # ── 16. Grant Gradle execute permission ───────────────────────────────
+      # ── 21. Grant gradlew execute permission ──────────────────────────────
       - name: Grant gradlew execute permission
         run: chmod +x ./gradlew
 
-      # ── 17. Verify full project structure ────────────────────────────────
+      # ── 22. Verify full project structure ────────────────────────────────
       - name: Verify project structure
         run: |
-          echo "=== gradle/wrapper ==="  && ls -lh gradle/wrapper/
-          echo "=== res/xml ==="         && ls app/src/main/res/xml/
-          echo "=== res/values ==="      && ls app/src/main/res/values/
-          echo "=== JNI sources ==="     && find app/src/main/jni -name "*.cpp" | sort
-          echo "=== Kotlin sources ==="  && find app/src/main/kotlin -name "*.kt" | sort
+          echo "=== gradle/wrapper ===" && ls -lh gradle/wrapper/
+          echo "=== res/xml ===" && ls app/src/main/res/xml/
+          echo "=== JNI sources ===" && find app/src/main/jni -name "*.cpp" | sort
+          echo "=== Kotlin sources ===" && find app/src/main/kotlin -name "*.kt" | sort
 
-      # ── 18. Run unit tests ────────────────────────────────────────────────
+      # ── 23. Run unit tests ────────────────────────────────────────────────
       - name: Run unit tests
         run: |
-          unset GRADLE_OPTS
-          ./gradlew testDebugUnitTest \
-            --stacktrace --no-daemon \
-            -Dorg.gradle.jvmargs="-Xmx2g"
+          unset GRADLE_OPTS JAVA_TOOL_OPTIONS _JAVA_OPTIONS
+          ./gradlew testDebugUnitTest --stacktrace --no-daemon \
+            -Dorg.gradle.jvmargs="-Xmx2g -XX:MaxMetaspaceSize=512m"
         continue-on-error: true
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
-      # ── 19. Lint ──────────────────────────────────────────────────────────
+      # ── 24. Lint ──────────────────────────────────────────────────────────
       - name: Run Android Lint
         run: |
-          unset GRADLE_OPTS
-          ./gradlew lintDebug \
-            --stacktrace --no-daemon \
-            -Dorg.gradle.jvmargs="-Xmx2g"
+          unset GRADLE_OPTS JAVA_TOOL_OPTIONS _JAVA_OPTIONS
+          ./gradlew lintDebug --stacktrace --no-daemon \
+            -Dorg.gradle.jvmargs="-Xmx2g -XX:MaxMetaspaceSize=512m"
         continue-on-error: true
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
-      # ── 20. Assemble Debug APK ────────────────────────────────────────────
+      # ── 25. Assemble Debug APK ────────────────────────────────────────────
       - name: Assemble Debug APK
         run: |
-          unset GRADLE_OPTS
+          unset GRADLE_OPTS JAVA_TOOL_OPTIONS _JAVA_OPTIONS
           ./gradlew assembleDebug \
             --stacktrace --no-daemon \
             -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=512m" \
@@ -564,25 +701,21 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
-      # ── 21. ccache stats ──────────────────────────────────────────────────
+      # ── 26. ccache stats ──────────────────────────────────────────────────
       - name: Print ccache statistics
         if: always()
         run: ccache --show-stats
 
-      # ── 22. Locate generated APK ──────────────────────────────────────────
+      # ── 27. Locate APK ───────────────────────────────────────────────────
       - name: Locate generated APK
         id: find-apk
         run: |
-          APK_PATH=$(find . -name "*.apk" -path "*/debug/*" ! -name "*unsigned*" | head -1)
-          if [ -z "$APK_PATH" ]; then
-            echo "❌ No APK found!"
-            find . -name "*.apk" || true
-            exit 1
-          fi
-          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
-          echo "✅ APK: $APK_PATH  ($(du -sh "$APK_PATH" | cut -f1))"
+          APK=$(find . -name "*.apk" -path "*/debug/*" ! -name "*unsigned*" | head -1)
+          [ -z "$APK" ] && echo "❌ No APK!" && find . -name "*.apk" && exit 1
+          echo "apk_path=$APK" >> $GITHUB_OUTPUT
+          echo "✅ APK: $APK  ($(du -sh "$APK" | cut -f1))"
 
-      # ── 23. Upload Debug APK ──────────────────────────────────────────────
+      # ── 28. Upload Debug APK ──────────────────────────────────────────────
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
@@ -591,7 +724,7 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
-      # ── 24. Upload Lint report ────────────────────────────────────────────
+      # ── 29. Upload Lint report ────────────────────────────────────────────
       - name: Upload Lint report
         uses: actions/upload-artifact@v4
         if: always()
@@ -601,7 +734,7 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-      # ── 25. Upload test results ───────────────────────────────────────────
+      # ── 30. Upload test results ───────────────────────────────────────────
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: always()
@@ -611,7 +744,7 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-      # ── 26. Build summary ─────────────────────────────────────────────────
+      # ── 31. Build summary ─────────────────────────────────────────────────
       - name: Write build summary
         if: always()
         run: |
