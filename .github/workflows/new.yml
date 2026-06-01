@@ -1,13 +1,7 @@
 # ============================================================
 # .github/workflows/debug-build.yml
 # Package: com.konasl.nagad
-# Self-healing CI/CD:
-#   - Auto-generates gradle wrapper if missing
-#   - Auto-generates all missing config files (local.properties,
-#     libs.versions.toml, network_security_config, file_paths, etc.)
-#   - Installs JDK 17, Android SDK 34, NDK 26.1.x, CMake 3.22
-#   - Caches Gradle + ccache
-#   - Builds Debug APK and uploads as artifact
+# Self-healing CI/CD — auto-generates ALL missing files then builds.
 # ============================================================
 name: Android Debug Build
 
@@ -29,10 +23,8 @@ env:
   CMAKE_VERSION:       "3.22.1"
   JAVA_VERSION:        "17"
   GRADLE_VERSION:      "8.7"
-  GRADLE_OPTS:         "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g -Xms1g -XX:MaxMetaspaceSize=512m"
 
 jobs:
-  # ═══════════════════════════════════════════════════════════════════════════
   debug-build:
     name: "Build Debug APK"
     runs-on: ubuntu-latest
@@ -49,9 +41,9 @@ jobs:
       - name: Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
         with:
-          java-version:  ${{ env.JAVA_VERSION }}
-          distribution:  "temurin"
-          cache:         "gradle"
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: "temurin"
+          # NOTE: do NOT set cache: gradle here — wrapper may not exist yet
 
       # ── 3. Android SDK ─────────────────────────────────────────────────────
       - name: Set up Android SDK
@@ -68,31 +60,82 @@ jobs:
             "ndk;${{ env.NDK_VERSION }}"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}" >> $GITHUB_ENV
           echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}"         >> $GITHUB_ENV
-          echo "CMAKE_HOME=$ANDROID_SDK_ROOT/cmake/${{ env.CMAKE_VERSION }}/bin" >> $GITHUB_ENV
 
-      # ── 4. AUTO-GENERATE: Gradle Wrapper (if missing) ─────────────────────
-      #    Root cause of the original failure: no gradle/wrapper/gradle-wrapper.jar
-      #    Fix: bootstrap with a standalone Gradle installation, then generate wrapper
+      # ── 4. AUTO-GENERATE: Gradle Wrapper (direct binary download — no SDKMAN) ──
+      #    Root cause: gradle-wrapper.jar was missing from the repo.
+      #    Fix: download the exact Gradle zip directly from services.gradle.org,
+      #    unpack it, run "gradle wrapper", then discard the temp installation.
+      #    GRADLE_OPTS is intentionally unset here to avoid heap-size conflicts.
       - name: Bootstrap Gradle wrapper if missing
         run: |
-          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            echo "⚠️  gradle-wrapper.jar missing — bootstrapping now..."
-
-            # Install the exact Gradle version we need via SDKMAN
-            curl -s "https://get.sdkman.io" | bash
-            source "$HOME/.sdkman/bin/sdkman-init.sh"
-            sdk install gradle ${{ env.GRADLE_VERSION }}
-            gradle wrapper --gradle-version=${{ env.GRADLE_VERSION }} --distribution-type=bin
-
-            # Verify the files were created
-            ls -lh gradle/wrapper/
-            echo "✅ Gradle wrapper generated successfully."
-          else
+          if [ -f "gradle/wrapper/gradle-wrapper.jar" ]; then
             echo "✅ gradle-wrapper.jar already present — skipping bootstrap."
             ls -lh gradle/wrapper/
+            exit 0
           fi
 
-      # ── 5. AUTO-GENERATE: local.properties ────────────────────────────────
+          echo "⚠️  gradle-wrapper.jar missing — bootstrapping via direct download..."
+
+          GRADLE_VER="${{ env.GRADLE_VERSION }}"
+          GRADLE_ZIP="gradle-${GRADLE_VER}-bin.zip"
+          GRADLE_URL="https://services.gradle.org/distributions/${GRADLE_ZIP}"
+          INSTALL_DIR="$HOME/.gradle-bootstrap"
+
+          # Download
+          mkdir -p "$INSTALL_DIR"
+          echo "Downloading Gradle ${GRADLE_VER} from ${GRADLE_URL} ..."
+          curl -fsSL --retry 5 --retry-delay 3 \
+               -o "$INSTALL_DIR/${GRADLE_ZIP}" "$GRADLE_URL"
+
+          # Unzip
+          unzip -q "$INSTALL_DIR/${GRADLE_ZIP}" -d "$INSTALL_DIR"
+          GRADLE_BIN="$INSTALL_DIR/gradle-${GRADLE_VER}/bin/gradle"
+          chmod +x "$GRADLE_BIN"
+
+          # Generate wrapper — UNSET all heap opts to avoid VM init errors
+          echo "Generating Gradle wrapper..."
+          unset GRADLE_OPTS
+          unset JAVA_TOOL_OPTIONS
+          unset _JAVA_OPTIONS
+          "$GRADLE_BIN" wrapper \
+            --gradle-version="${GRADLE_VER}" \
+            --distribution-type=bin \
+            -Dorg.gradle.jvmargs="-Xmx512m"
+
+          # Verify
+          ls -lh gradle/wrapper/
+          echo "✅ Gradle wrapper generated successfully."
+
+          # Cleanup temp installation
+          rm -rf "$INSTALL_DIR"
+
+      # ── 5. AUTO-GENERATE: gradle-wrapper.properties (ensure correct version) ──
+      - name: Ensure gradle-wrapper.properties is correct
+        run: |
+          PROPS="gradle/wrapper/gradle-wrapper.properties"
+          mkdir -p gradle/wrapper
+          CURRENT_VER=""
+          if [ -f "$PROPS" ]; then
+            CURRENT_VER=$(grep "distributionUrl" "$PROPS" | grep -oP "gradle-\K[0-9]+\.[0-9]+" || echo "")
+          fi
+          if [ "$CURRENT_VER" != "${{ env.GRADLE_VERSION }}" ]; then
+            echo "Writing gradle-wrapper.properties for Gradle ${{ env.GRADLE_VERSION }}..."
+            cat > "$PROPS" << 'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-${{ env.GRADLE_VERSION }}-bin.zip
+          networkTimeout=10000
+          validateDistributionUrl=true
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+            echo "✅ gradle-wrapper.properties written."
+          else
+            echo "✅ gradle-wrapper.properties already correct (Gradle $CURRENT_VER)."
+          fi
+          cat "$PROPS"
+
+      # ── 6. AUTO-GENERATE: local.properties ────────────────────────────────
       - name: Generate local.properties
         run: |
           cat > local.properties << EOF
@@ -103,40 +146,39 @@ jobs:
           echo "✅ local.properties written:"
           cat local.properties
 
-      # ── 6. AUTO-GENERATE: libs.versions.toml (if missing) ─────────────────
+      # ── 7. AUTO-GENERATE: libs.versions.toml ──────────────────────────────
       - name: Generate libs.versions.toml if missing
         run: |
           mkdir -p gradle
           if [ ! -f "gradle/libs.versions.toml" ]; then
-            echo "⚠️  libs.versions.toml missing — generating..."
+            echo "Generating gradle/libs.versions.toml ..."
             cat > gradle/libs.versions.toml << 'TOML'
           [versions]
-          agp                 = "8.3.2"
-          kotlin              = "1.9.24"
-          ksp                 = "1.9.24-1.0.20"
-          hilt                = "2.51.1"
-          navigation          = "2.7.7"
+          agp        = "8.3.2"
+          kotlin     = "1.9.24"
+          ksp        = "1.9.24-1.0.20"
+          hilt       = "2.51.1"
+          navigation = "2.7.7"
 
           [plugins]
-          android-application = { id = "com.android.application",         version.ref = "agp"        }
-          android-library     = { id = "com.android.library",             version.ref = "agp"        }
-          kotlin-android      = { id = "org.jetbrains.kotlin.android",    version.ref = "kotlin"     }
-          kotlin-parcelize    = { id = "org.jetbrains.kotlin.parcelize",  version.ref = "kotlin"     }
-          ksp                 = { id = "com.google.devtools.ksp",         version.ref = "ksp"        }
-          hilt                = { id = "com.google.dagger.hilt.android",  version.ref = "hilt"       }
+          android-application = { id = "com.android.application",        version.ref = "agp"    }
+          android-library     = { id = "com.android.library",            version.ref = "agp"    }
+          kotlin-android      = { id = "org.jetbrains.kotlin.android",   version.ref = "kotlin" }
+          kotlin-parcelize    = { id = "org.jetbrains.kotlin.parcelize", version.ref = "kotlin" }
+          ksp                 = { id = "com.google.devtools.ksp",        version.ref = "ksp"    }
+          hilt                = { id = "com.google.dagger.hilt.android", version.ref = "hilt"   }
           TOML
             echo "✅ libs.versions.toml generated."
           else
             echo "✅ libs.versions.toml already present."
           fi
 
-      # ── 7. AUTO-GENERATE: Missing res/xml files ────────────────────────────
+      # ── 8. AUTO-GENERATE: res/xml and res/values files ────────────────────
       - name: Generate missing resource XML files
         run: |
           mkdir -p app/src/main/res/xml
           mkdir -p app/src/main/res/values
 
-          # network_security_config.xml
           if [ ! -f "app/src/main/res/xml/network_security_config.xml" ]; then
             cat > app/src/main/res/xml/network_security_config.xml << 'XML'
           <?xml version="1.0" encoding="utf-8"?>
@@ -149,24 +191,22 @@ jobs:
               </base-config>
           </network-security-config>
           XML
-            echo "✅ network_security_config.xml generated."
+            echo "✅ network_security_config.xml"
           fi
 
-          # file_paths.xml
           if [ ! -f "app/src/main/res/xml/file_paths.xml" ]; then
             cat > app/src/main/res/xml/file_paths.xml << 'XML'
           <?xml version="1.0" encoding="utf-8"?>
           <paths xmlns:android="http://schemas.android.com/apk/res/android">
-              <files-path      name="virtual_space"  path="virtual_space/" />
-              <cache-path      name="cache"           path="." />
-              <external-path   name="external"        path="." />
+              <files-path      name="virtual_space"    path="virtual_space/" />
+              <cache-path      name="cache"             path="." />
+              <external-path   name="external"          path="." />
               <external-files-path name="external_files" path="." />
           </paths>
           XML
-            echo "✅ file_paths.xml generated."
+            echo "✅ file_paths.xml"
           fi
 
-          # data_extraction_rules.xml
           if [ ! -f "app/src/main/res/xml/data_extraction_rules.xml" ]; then
             cat > app/src/main/res/xml/data_extraction_rules.xml << 'XML'
           <?xml version="1.0" encoding="utf-8"?>
@@ -179,10 +219,9 @@ jobs:
               </device-transfer>
           </data-extraction-rules>
           XML
-            echo "✅ data_extraction_rules.xml generated."
+            echo "✅ data_extraction_rules.xml"
           fi
 
-          # strings.xml
           if [ ! -f "app/src/main/res/values/strings.xml" ]; then
             cat > app/src/main/res/values/strings.xml << 'XML'
           <?xml version="1.0" encoding="utf-8"?>
@@ -190,46 +229,52 @@ jobs:
               <string name="app_name">Nagad Virtual Space</string>
           </resources>
           XML
-            echo "✅ strings.xml generated."
+            echo "✅ strings.xml"
           fi
 
-          echo "✅ All resource XML files present."
+          echo "✅ All resource XML files ready."
 
-      # ── 8. AUTO-GENERATE: mipmap launcher icon stubs ─────────────────────
+      # ── 9. AUTO-GENERATE: Launcher icon PNG stubs ─────────────────────────
       - name: Generate launcher icon stubs if missing
         run: |
-          for density in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
-            DIR="app/src/main/res/mipmap-$density"
-            mkdir -p "$DIR"
-            if [ ! -f "$DIR/ic_launcher.png" ]; then
-              # Create a minimal 1x1 valid PNG using Python
-              python3 -c "
+          python3 - << 'PY'
           import struct, zlib, os
-          def make_png(path, w=48, h=48):
+
+          def make_png(path, r=74, g=143, b=208):
+              """Create a minimal valid 48x48 RGB PNG at the given path."""
+              w, h = 48, 48
               def chunk(name, data):
-                  c = zlib.crc32(name + data) & 0xffffffff
-                  return struct.pack('>I', len(data)) + name + data + struct.pack('>I', c)
-              raw = b'\\x89PNG\\r\\n\\x1a\\n'
+                  crc = zlib.crc32(name + data) & 0xffffffff
+                  return struct.pack('>I', len(data)) + name + data + struct.pack('>I', crc)
+              raw  = b'\x89PNG\r\n\x1a\n'
               raw += chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
-              row = b'\\x00' + b'\\x4a\\x8f\\xd0' * w
+              row  = b'\x00' + bytes([r, g, b]) * w
               raw += chunk(b'IDAT', zlib.compress(row * h))
               raw += chunk(b'IEND', b'')
-              with open(path, 'wb') as f: f.write(raw)
-          make_png('$DIR/ic_launcher.png')
-          make_png('$DIR/ic_launcher_round.png')
-          print('Written $DIR/ic_launcher*.png')
-          "
-            fi
-          done
-          echo "✅ Launcher icon stubs ready."
+              os.makedirs(os.path.dirname(path), exist_ok=True)
+              with open(path, 'wb') as f:
+                  f.write(raw)
 
-      # ── 9. AUTO-GENERATE: Missing Kotlin stub sources ─────────────────────
+          for density in ['mdpi', 'hdpi', 'xhdpi', 'xxhdpi', 'xxxhdpi']:
+              d = f'app/src/main/res/mipmap-{density}'
+              for name in ['ic_launcher.png', 'ic_launcher_round.png']:
+                  p = f'{d}/{name}'
+                  if not os.path.exists(p):
+                      make_png(p)
+                      print(f'  ✅ Generated: {p}')
+                  else:
+                      print(f'  OK: {p}')
+
+          print('✅ Launcher icons ready.')
+          PY
+
+      # ── 10. AUTO-GENERATE: Missing Kotlin source stubs ────────────────────
       - name: Generate missing Kotlin source stubs
         run: |
           BASE="app/src/main/kotlin/com/konasl/nagad"
 
-          # HiddenApiBypass.kt (standalone object — not inside util/Compat.kt)
-          if ! grep -r "object HiddenApiBypass" "$BASE" 2>/dev/null | grep -q .; then
+          # ── HiddenApiBypass.kt ──────────────────────────────────────────────
+          if [ ! -f "$BASE/HiddenApiBypass.kt" ]; then
             mkdir -p "$BASE"
             cat > "$BASE/HiddenApiBypass.kt" << 'KT'
           package com.konasl.nagad
@@ -237,7 +282,6 @@ jobs:
           import timber.log.Timber
           import java.lang.reflect.Method
           object HiddenApiBypass {
-              private const val TAG = "HiddenApiBypass"
               fun install() {
                   if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
                   try {
@@ -248,20 +292,19 @@ jobs:
                       val getRuntime = getDeclM.invoke(vmRuntime, "getRuntime", null) as Method
                       val setHidden = getDeclM.invoke(vmRuntime, "setHiddenApiExemptions",
                           arrayOf(Array<String>::class.java)) as Method
-                      val rt = getRuntime.invoke(null)
-                      setHidden.invoke(rt, arrayOf("L"))
-                      Timber.tag(TAG).i("Hidden API bypass installed.")
+                      setHidden.invoke(getRuntime.invoke(null), arrayOf("L"))
+                      Timber.i("Hidden API bypass installed.")
                   } catch (e: Exception) {
-                      Timber.tag(TAG).w(e, "Hidden API bypass failed.")
+                      Timber.w(e, "Hidden API bypass failed.")
                   }
               }
           }
           KT
-            echo "✅ HiddenApiBypass.kt generated."
+            echo "  ✅ HiddenApiBypass.kt"
           fi
 
-          # MultiDexCompat.kt
-          if ! grep -r "object MultiDexCompat" "$BASE" 2>/dev/null | grep -q .; then
+          # ── MultiDexCompat.kt ────────────────────────────────────────────────
+          if [ ! -f "$BASE/MultiDexCompat.kt" ]; then
             cat > "$BASE/MultiDexCompat.kt" << 'KT'
           package com.konasl.nagad
           import android.content.Context
@@ -271,40 +314,35 @@ jobs:
           object MultiDexCompat {
               fun install(context: Context) {
                   if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
-                      try { MultiDex.install(context) } catch (e: Exception) {
-                          Timber.e(e, "MultiDex install failed") }
+                      try { MultiDex.install(context) }
+                      catch (e: Exception) { Timber.e(e, "MultiDex install failed") }
                   }
               }
           }
           KT
-            echo "✅ MultiDexCompat.kt generated."
+            echo "  ✅ MultiDexCompat.kt"
           fi
 
-          # VirtualBinderService stub
-          BINDER="$BASE/engine/VirtualBinderService.kt"
-          if [ ! -f "$BINDER" ]; then
+          # ── VirtualBinderService.kt ──────────────────────────────────────────
+          if [ ! -f "$BASE/engine/VirtualBinderService.kt" ]; then
             mkdir -p "$BASE/engine"
-            cat > "$BINDER" << 'KT'
+            cat > "$BASE/engine/VirtualBinderService.kt" << 'KT'
           package com.konasl.nagad.engine
           import android.app.Service
           import android.content.Intent
           import android.os.IBinder
           import timber.log.Timber
           class VirtualBinderService : Service() {
-              override fun onBind(intent: Intent): IBinder? {
-                  Timber.d("VirtualBinderService bound")
-                  return null
-              }
+              override fun onBind(intent: Intent): IBinder? { Timber.d("VirtualBinderService bound"); return null }
           }
           KT
-            echo "✅ VirtualBinderService.kt generated."
+            echo "  ✅ VirtualBinderService.kt"
           fi
 
-          # PermissionActivity stub
-          PERM="$BASE/ui/PermissionActivity.kt"
-          if [ ! -f "$PERM" ]; then
+          # ── PermissionActivity.kt ────────────────────────────────────────────
+          if [ ! -f "$BASE/ui/PermissionActivity.kt" ]; then
             mkdir -p "$BASE/ui"
-            cat > "$PERM" << 'KT'
+            cat > "$BASE/ui/PermissionActivity.kt" << 'KT'
           package com.konasl.nagad.ui
           import android.app.Activity
           import android.os.Bundle
@@ -312,14 +350,13 @@ jobs:
               override fun onCreate(s: Bundle?) { super.onCreate(s); finish() }
           }
           KT
-            echo "✅ PermissionActivity.kt generated."
+            echo "  ✅ PermissionActivity.kt"
           fi
 
-          # CloneWizardActivity stub
-          CLONE="$BASE/ui/clone/CloneWizardActivity.kt"
-          if [ ! -f "$CLONE" ]; then
+          # ── CloneWizardActivity.kt ───────────────────────────────────────────
+          if [ ! -f "$BASE/ui/clone/CloneWizardActivity.kt" ]; then
             mkdir -p "$BASE/ui/clone"
-            cat > "$CLONE" << 'KT'
+            cat > "$BASE/ui/clone/CloneWizardActivity.kt" << 'KT'
           package com.konasl.nagad.ui.clone
           import android.os.Bundle
           import androidx.appcompat.app.AppCompatActivity
@@ -329,14 +366,13 @@ jobs:
               override fun onCreate(s: Bundle?) { super.onCreate(s) }
           }
           KT
-            echo "✅ CloneWizardActivity.kt generated."
+            echo "  ✅ CloneWizardActivity.kt"
           fi
 
-          # SettingsActivity stub
-          SETTINGS="$BASE/ui/settings/SettingsActivity.kt"
-          if [ ! -f "$SETTINGS" ]; then
+          # ── SettingsActivity.kt ──────────────────────────────────────────────
+          if [ ! -f "$BASE/ui/settings/SettingsActivity.kt" ]; then
             mkdir -p "$BASE/ui/settings"
-            cat > "$SETTINGS" << 'KT'
+            cat > "$BASE/ui/settings/SettingsActivity.kt" << 'KT'
           package com.konasl.nagad.ui.settings
           import android.os.Bundle
           import androidx.appcompat.app.AppCompatActivity
@@ -346,12 +382,12 @@ jobs:
               override fun onCreate(s: Bundle?) { super.onCreate(s) }
           }
           KT
-            echo "✅ SettingsActivity.kt generated."
+            echo "  ✅ SettingsActivity.kt"
           fi
 
           echo "✅ All Kotlin stubs verified/generated."
 
-      # ── 10. AUTO-GENERATE: NDK C++ stub sources ───────────────────────────
+      # ── 11. AUTO-GENERATE: NDK C++ stub sources ───────────────────────────
       - name: Generate missing NDK C++ source stubs
         run: |
           JNI="app/src/main/jni"
@@ -361,145 +397,94 @@ jobs:
             "$JNI/lifecycle" "$JNI/uid_spoof" "$JNI/io_bypass" \
             "$JNI/linker" "$JNI/utils" "$JNI/include"
 
-          # Macro: write a minimal stub .cpp if missing
           write_stub() {
-            local FILE=$1; local CONTENT=$2
+            local FILE=$1 COMMENT=$2
             if [ ! -f "$FILE" ]; then
-              echo "$CONTENT" > "$FILE"
-              echo "  ✅ Generated: $FILE"
+              printf '#include <android/log.h>\n#define TAG "nagad_ve"\n// %s stub\n' "$COMMENT" > "$FILE"
+              echo "  ✅ $FILE"
             fi
           }
 
-          STUB_HEADER='#include <android/log.h>
-          #define TAG "nagad_ve"
-          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
-          #ifndef ENGINE_VERSION_STR
-          #define ENGINE_VERSION_STR "VE-1.0"
-          #endif'
+          write_stub "$JNI/art_hook/art_method_hook.cpp"          "ART method hook"
+          write_stub "$JNI/syscall_hook/syscall_intercept.cpp"    "Syscall intercept"
+          write_stub "$JNI/binder/binder_proxy.cpp"               "Binder proxy"
+          write_stub "$JNI/fs_redirect/fs_redirect.cpp"           "FS redirect"
+          write_stub "$JNI/process/process_isolation.cpp"         "Process isolation"
+          write_stub "$JNI/pm_hook/package_manager_hook.cpp"      "PM hook"
+          write_stub "$JNI/lifecycle/lifecycle_hook.cpp"          "Lifecycle hook"
+          write_stub "$JNI/uid_spoof/uid_spoof.cpp"               "UID spoof"
+          write_stub "$JNI/io_bypass/scoped_storage_bypass.cpp"   "Scoped storage bypass"
+          write_stub "$JNI/linker/dynamic_linker_hook.cpp"        "Dynamic linker hook"
+          write_stub "$JNI/utils/memory_utils.cpp"                "Memory utils"
+          write_stub "$JNI/utils/elf_utils.cpp"                   "ELF utils"
+          write_stub "$JNI/utils/string_utils.cpp"                "String utils"
+          write_stub "$JNI/utils/log_utils.cpp"                   "Log utils"
 
-          write_stub "$JNI/art_hook/art_method_hook.cpp"     "$STUB_HEADER
-          // ART method hook stub"
-
-          write_stub "$JNI/syscall_hook/syscall_intercept.cpp" "$STUB_HEADER
-          // Syscall intercept stub"
-
-          write_stub "$JNI/binder/binder_proxy.cpp"          "$STUB_HEADER
-          // Binder proxy stub"
-
-          write_stub "$JNI/fs_redirect/fs_redirect.cpp"      "$STUB_HEADER
-          // FS redirect stub"
-
-          write_stub "$JNI/process/process_isolation.cpp"    "$STUB_HEADER
-          // Process isolation stub"
-
-          write_stub "$JNI/pm_hook/package_manager_hook.cpp" "$STUB_HEADER
-          // PM hook stub"
-
-          write_stub "$JNI/lifecycle/lifecycle_hook.cpp"     "$STUB_HEADER
-          // Lifecycle hook stub"
-
-          write_stub "$JNI/uid_spoof/uid_spoof.cpp"          "$STUB_HEADER
-          // UID spoof stub"
-
-          write_stub "$JNI/io_bypass/scoped_storage_bypass.cpp" "$STUB_HEADER
-          // Scoped storage bypass stub"
-
-          write_stub "$JNI/linker/dynamic_linker_hook.cpp"   "$STUB_HEADER
-          // Dynamic linker hook stub"
-
-          write_stub "$JNI/utils/memory_utils.cpp"           "$STUB_HEADER
-          // Memory utils stub"
-
-          write_stub "$JNI/utils/elf_utils.cpp"              "$STUB_HEADER
-          // ELF utils stub"
-
-          write_stub "$JNI/utils/string_utils.cpp"           "$STUB_HEADER
-          // String utils stub"
-
-          write_stub "$JNI/utils/log_utils.cpp"              "$STUB_HEADER
-          // Log utils stub"
-
-          # dobby.h stub (real build fetches via ExternalProject; CI needs header to compile)
+          # Dobby CI stub header (real build fetches via git; CI uses no-op inline)
           if [ ! -f "$JNI/include/dobby.h" ]; then
             cat > "$JNI/include/dobby.h" << 'H'
           #pragma once
           #ifdef __cplusplus
           extern "C" {
           #endif
-          // Minimal Dobby stub header for CI compilation
-          static inline int DobbyHook(void* addr, void* replace, void** orig) {
-              if (orig) *orig = addr;
-              (void)replace;
-              return 0; // no-op in stub build
+          /* CI no-op stub — real builds use the full Dobby framework */
+          static inline int DobbyHook(void* a, void* b, void** o) {
+              if (o) *o = a; (void)b; return 0;
           }
-          static inline int DobbyDestroy(void* addr) { (void)addr; return 0; }
+          static inline int DobbyDestroy(void* a) { (void)a; return 0; }
           #ifdef __cplusplus
           }
           #endif
           H
-            echo "  ✅ Generated: $JNI/include/dobby.h (CI stub)"
+            echo "  ✅ dobby.h (CI stub)"
           fi
 
-          echo "✅ All NDK source stubs verified/generated."
+          echo "✅ All NDK stubs ready."
 
-      # ── 11. PATCH CMakeLists.txt for CI (remove ExternalProject/Dobby) ────
-      #    Dobby's ExternalProject_Add tries to git-clone at build time,
-      #    which is slow and fragile in CI. We swap it out for the stub header.
-      - name: Patch CMakeLists.txt for CI stub build
+      # ── 12. PATCH CMakeLists.txt: remove ExternalProject Dobby for CI ─────
+      #    ExternalProject_Add tries to git-clone Dobby at build time —
+      #    slow, fragile, and unnecessary in CI where we use the stub header.
+      - name: Patch CMakeLists.txt for CI (replace Dobby ExternalProject with stub)
         run: |
-          CMAKE_FILE="app/src/main/jni/CMakeLists.txt"
-          if grep -q "ExternalProject_Add" "$CMAKE_FILE"; then
-            echo "⚙️  Patching CMakeLists.txt — replacing ExternalProject with stub Dobby..."
-            python3 - "$CMAKE_FILE" << 'PY'
+          CMAKE="app/src/main/jni/CMakeLists.txt"
+          if [ ! -f "$CMAKE" ]; then
+            echo "⚠️  CMakeLists.txt not found — skipping patch."
+            exit 0
+          fi
+          if grep -q "ExternalProject_Add" "$CMAKE"; then
+            echo "Patching CMakeLists.txt..."
+            python3 - "$CMAKE" << 'PY'
           import sys, re
 
           path = sys.argv[1]
           with open(path) as f:
               src = f.read()
 
-          # Remove include(ExternalProject) + ExternalProject_Add block + Get_Property calls
-          src = re.sub(r'include\(ExternalProject\).*?set\(DOBBY_LIB_DIR.*?\)', '',
-                       src, flags=re.DOTALL)
+          # Remove the entire ExternalProject block (include → last set(DOBBY_LIB_DIR...))
+          src = re.sub(
+              r'include\(ExternalProject\).*?set\s*\(DOBBY_LIB_DIR[^\)]*\)',
+              '',
+              src, flags=re.DOTALL)
 
-          # Replace Dobby include dir with stub header location
+          # Replace ${DOBBY_INCLUDE_DIR} with the stub include directory
           src = src.replace('${DOBBY_INCLUDE_DIR}', '${SRC_DIR}/include')
 
-          # Replace link to static Dobby lib with nothing (stub is header-only)
-          src = src.replace('${DOBBY_LIB_DIR}/libdobby.a\n', '')
+          # Remove link to static Dobby lib
+          src = re.sub(r'\s*\$\{DOBBY_LIB_DIR\}/libdobby\.a\n?', '\n', src)
 
-          # Remove add_dependencies line
-          src = re.sub(r'\s*add_dependencies\(nagad_ve dobby_ext\)\n', '\n', src)
+          # Remove add_dependencies(nagad_ve dobby_ext)
+          src = re.sub(r'\s*add_dependencies\s*\(\s*nagad_ve\s+dobby_ext\s*\)\n?', '\n', src)
 
           with open(path, 'w') as f:
               f.write(src)
+
           print("✅ CMakeLists.txt patched for CI stub build.")
           PY
           else
-            echo "✅ CMakeLists.txt already clean (no ExternalProject block)."
+            echo "✅ CMakeLists.txt has no ExternalProject block — nothing to patch."
           fi
 
-      # ── 12. AUTO-GENERATE: gradle-wrapper.properties (if missing) ─────────
-      - name: Ensure gradle-wrapper.properties is correct
-        run: |
-          PROPS="gradle/wrapper/gradle-wrapper.properties"
-          mkdir -p gradle/wrapper
-          if [ ! -f "$PROPS" ] || ! grep -q "gradle-${{ env.GRADLE_VERSION }}" "$PROPS"; then
-            cat > "$PROPS" << EOF
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-${{ env.GRADLE_VERSION }}-bin.zip
-          networkTimeout=10000
-          validateDistributionUrl=true
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          EOF
-            echo "✅ gradle-wrapper.properties written for Gradle ${{ env.GRADLE_VERSION }}."
-          else
-            echo "✅ gradle-wrapper.properties already correct."
-            cat "$PROPS"
-          fi
-
-      # ── 13. Gradle wrapper validation (updated action) ────────────────────
+      # ── 13. Gradle wrapper validation (modern action) ─────────────────────
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@v3
 
@@ -531,40 +516,39 @@ jobs:
         run: |
           sudo apt-get install -y ccache
           ccache --zero-stats
-          echo "PATH=/usr/lib/ccache:$PATH" >> $GITHUB_ENV
+          echo "/usr/lib/ccache" >> $GITHUB_PATH
 
-      # ── 16. Grant Gradle execute permission ──────────────────────────────
-      - name: Grant execute permission for Gradle wrapper
+      # ── 16. Grant Gradle execute permission ───────────────────────────────
+      - name: Grant gradlew execute permission
         run: chmod +x ./gradlew
 
-      # ── 17. Verify project structure ─────────────────────────────────────
+      # ── 17. Verify full project structure ────────────────────────────────
       - name: Verify project structure
         run: |
-          echo "=== Root directory ==="
-          ls -la
-          echo ""
-          echo "=== gradle/wrapper ==="
-          ls -lh gradle/wrapper/
-          echo ""
-          echo "=== app/src/main/res/xml ==="
-          ls app/src/main/res/xml/ 2>/dev/null || echo "(empty)"
-          echo ""
-          echo "=== NDK JNI sources ==="
-          find app/src/main/jni -name "*.cpp" | sort
-          echo ""
-          echo "=== Kotlin sources ==="
-          find app/src/main/kotlin -name "*.kt" | sort
+          echo "=== gradle/wrapper ==="  && ls -lh gradle/wrapper/
+          echo "=== res/xml ==="         && ls app/src/main/res/xml/
+          echo "=== res/values ==="      && ls app/src/main/res/values/
+          echo "=== JNI sources ==="     && find app/src/main/jni -name "*.cpp" | sort
+          echo "=== Kotlin sources ==="  && find app/src/main/kotlin -name "*.kt" | sort
 
       # ── 18. Run unit tests ────────────────────────────────────────────────
       - name: Run unit tests
-        run: ./gradlew testDebugUnitTest --stacktrace --no-daemon
+        run: |
+          unset GRADLE_OPTS
+          ./gradlew testDebugUnitTest \
+            --stacktrace --no-daemon \
+            -Dorg.gradle.jvmargs="-Xmx2g"
         continue-on-error: true
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
       # ── 19. Lint ──────────────────────────────────────────────────────────
       - name: Run Android Lint
-        run: ./gradlew lintDebug --stacktrace --no-daemon
+        run: |
+          unset GRADLE_OPTS
+          ./gradlew lintDebug \
+            --stacktrace --no-daemon \
+            -Dorg.gradle.jvmargs="-Xmx2g"
         continue-on-error: true
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
@@ -572,34 +556,33 @@ jobs:
       # ── 20. Assemble Debug APK ────────────────────────────────────────────
       - name: Assemble Debug APK
         run: |
+          unset GRADLE_OPTS
           ./gradlew assembleDebug \
-            --stacktrace \
-            --no-daemon \
-            -Pandroid.ndkPath=$ANDROID_NDK_HOME \
-            -Pandroid.cmake.dir=$CMAKE_HOME
+            --stacktrace --no-daemon \
+            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=512m" \
+            -Pandroid.ndkPath="$ANDROID_NDK_HOME"
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
-          CMAKE_HOME:       ${{ env.CMAKE_HOME }}
 
       # ── 21. ccache stats ──────────────────────────────────────────────────
       - name: Print ccache statistics
         if: always()
         run: ccache --show-stats
 
-      # ── 22. Locate APK ───────────────────────────────────────────────────
+      # ── 22. Locate generated APK ──────────────────────────────────────────
       - name: Locate generated APK
         id: find-apk
         run: |
           APK_PATH=$(find . -name "*.apk" -path "*/debug/*" ! -name "*unsigned*" | head -1)
           if [ -z "$APK_PATH" ]; then
             echo "❌ No APK found!"
+            find . -name "*.apk" || true
             exit 1
           fi
           echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
-          echo "✅ Found APK: $APK_PATH"
-          ls -lh "$APK_PATH"
+          echo "✅ APK: $APK_PATH  ($(du -sh "$APK_PATH" | cut -f1))"
 
-      # ── 23. Upload Debug APK ─────────────────────────────────────────────
+      # ── 23. Upload Debug APK ──────────────────────────────────────────────
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
@@ -608,7 +591,7 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
-      # ── 24. Upload Lint report ───────────────────────────────────────────
+      # ── 24. Upload Lint report ────────────────────────────────────────────
       - name: Upload Lint report
         uses: actions/upload-artifact@v4
         if: always()
@@ -618,7 +601,7 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-      # ── 25. Upload test results ──────────────────────────────────────────
+      # ── 25. Upload test results ───────────────────────────────────────────
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: always()
@@ -628,18 +611,18 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-      # ── 26. Build summary ────────────────────────────────────────────────
+      # ── 26. Build summary ─────────────────────────────────────────────────
       - name: Write build summary
         if: always()
         run: |
-          echo "## 📦 Nagad Virtual Space — Debug Build"         >> $GITHUB_STEP_SUMMARY
-          echo ""                                                 >> $GITHUB_STEP_SUMMARY
-          echo "| Field      | Value |"                          >> $GITHUB_STEP_SUMMARY
-          echo "|------------|-------|"                          >> $GITHUB_STEP_SUMMARY
-          echo "| Branch     | \`${{ github.ref_name }}\` |"    >> $GITHUB_STEP_SUMMARY
-          echo "| Commit     | \`${{ github.sha }}\` |"         >> $GITHUB_STEP_SUMMARY
-          echo "| JDK        | ${{ env.JAVA_VERSION }} Temurin |" >> $GITHUB_STEP_SUMMARY
-          echo "| Gradle     | ${{ env.GRADLE_VERSION }} |"     >> $GITHUB_STEP_SUMMARY
-          echo "| NDK        | ${{ env.NDK_VERSION }} |"        >> $GITHUB_STEP_SUMMARY
-          echo "| Target SDK | ${{ env.ANDROID_COMPILE_SDK }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Run        | #${{ github.run_number }} |"     >> $GITHUB_STEP_SUMMARY
+          echo "## 📦 Nagad Virtual Space — Debug Build"              >> $GITHUB_STEP_SUMMARY
+          echo ""                                                      >> $GITHUB_STEP_SUMMARY
+          echo "| Field      | Value |"                               >> $GITHUB_STEP_SUMMARY
+          echo "|------------|-------|"                               >> $GITHUB_STEP_SUMMARY
+          echo "| Branch     | \`${{ github.ref_name }}\` |"         >> $GITHUB_STEP_SUMMARY
+          echo "| Commit     | \`${{ github.sha }}\` |"              >> $GITHUB_STEP_SUMMARY
+          echo "| JDK        | ${{ env.JAVA_VERSION }} (Temurin) |"  >> $GITHUB_STEP_SUMMARY
+          echo "| Gradle     | ${{ env.GRADLE_VERSION }} |"          >> $GITHUB_STEP_SUMMARY
+          echo "| NDK        | ${{ env.NDK_VERSION }} |"             >> $GITHUB_STEP_SUMMARY
+          echo "| Target SDK | ${{ env.ANDROID_COMPILE_SDK }} |"     >> $GITHUB_STEP_SUMMARY
+          echo "| Run        | #${{ github.run_number }} |"          >> $GITHUB_STEP_SUMMARY
